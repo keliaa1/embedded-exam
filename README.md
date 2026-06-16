@@ -5,7 +5,7 @@
 > **Date:** June 16, 2026
 
 ---
-
+link: http://157.173.101.159:8267/dashboard.html
 ## 📸 Dashboard Preview
 
 ![SPEES-402 Retro Dashboard — Live at 25.7 °C, ONLINE status](image.png)
