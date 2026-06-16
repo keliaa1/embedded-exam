@@ -465,7 +465,7 @@
         <div style="font-size:0.65rem;letter-spacing:3px;color:var(--text);opacity:0.45;margin-bottom:8px;">MQTT CONFIG</div>
         <div class="mqtt-info">
           <div class="mqtt-row"><span class="mqtt-key">BROKER</span><span class="mqtt-val">157.173.101.159</span></div>
-          <div class="mqtt-row"><span class="mqtt-key">PORT</span><span class="mqtt-val">24022 (TCP)</span></div>
+          <div class="mqtt-row"><span class="mqtt-key">PORT</span><span class="mqtt-val">8267</span></div>
           <div class="mqtt-row"><span class="mqtt-key">BRIDGE</span><span class="mqtt-val">localhost:8765</span></div>
           <div class="mqtt-row"><span class="mqtt-key">TOPIC</span><span class="mqtt-val" style="font-size:0.62rem;">spees402/temperature/<br>Kayiranga Simbi Kelia</span></div>
           <div class="mqtt-row"><span class="mqtt-key">QoS</span><span class="mqtt-val">1 · RETAINED</span></div>
@@ -514,13 +514,13 @@
 <script>
 /* ══════════════════════════════════════════════════════════
    CONFIG  — dashboard connects to local bridge.py
-   bridge.py subscribes to the real MQTT broker (TCP:24022)
+   bridge.py subscribes to the real MQTT broker (TCP:8267)
    and forwards messages here via WebSocket
    ══════════════════════════════════════════════════════════ */
 const CFG = {
   // ── Broker (direct WebSocket MQTT attempt) ──────────────
   brokerHost: "157.173.101.159",
-  brokerPort: 24022,           // try WS MQTT on same port as TCP
+  brokerPort: 8267,            // try WS MQTT on same port as TCP
   // ── Local bridge fallback ────────────────────────────────
   bridgeUrl:  "ws://localhost:8765",
   // ── Shared ──────────────────────────────────────────────
@@ -765,23 +765,9 @@ function connectBridge() {
 
 connectBridge();
 
-/* ── Demo mode: simulated data until real readings arrive ───── */
-let realDataReceived = false;
-
-// Patch onNewTemp to mark real data
-const _origOnNewTemp = onNewTemp;
-window.onNewTemp = function(v) { realDataReceived = true; _origOnNewTemp(v); };
-// ws.onmessage already calls onNewTemp via the global; repoint it
-const _origConnectBridge = connectBridge;
-
-(function demoTick() {
-  if (!realDataReceived) {
-    const fake = (23 + Math.random() * 5).toFixed(1);
-    log(`[DEMO] Simulated ${fake} °C — start bridge.py for live data`, "warn");
-    onNewTemp(fake);
-  }
-  setTimeout(demoTick, 4000);
-})();
+/* ── Waiting for live data only ─────────────────────────────── */
+log("Waiting for live temperature from MQTT broker ...");
+setStatus("connecting");
 </script>
 </body>
 </html>
