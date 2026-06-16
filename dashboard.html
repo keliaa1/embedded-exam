@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SPEES-402 · Retro Weather Station</title>
+  <meta name="description" content="Retro-style live temperature dashboard for SPEES-402 embedded systems exam — Kayiranga Simbi Kelia" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=VT323&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet" />
+  <!-- Paho MQTT (tries broker WebSocket directly) + native WS bridge fallback -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+
+  <style>
+    /* ── Reset & base ───────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --green:   #39ff14;
+      --amber:   #ffb300;
+      --red:     #ff3c3c;
+      --dim:     #1a2a1a;
+      --bg:      #0a0f0a;
+      --panel:   #0d150d;
+      --border:  #1e3a1e;
+      --text:    #c8f0c8;
+      --glow:    0 0 8px #39ff14, 0 0 20px #39ff14aa, 0 0 40px #39ff1444;
+      --glow-amber: 0 0 8px #ffb300, 0 0 20px #ffb300aa;
+      --glow-red:   0 0 8px #ff3c3c, 0 0 20px #ff3c3caa;
+      --scanline: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 3px,
+        rgba(0,0,0,0.18) 3px,
+        rgba(0,0,0,0.18) 4px
+      );
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--green);
+      font-family: 'Share Tech Mono', monospace;
+      overflow-x: hidden;
+    }
+
+    /* CRT scanline overlay */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background: var(--scanline);
+      pointer-events: none;
+      z-index: 9999;
+      opacity: 0.6;
+    }
+    /* CRT vignette */
+    body::after {
+      content: '';
+      position: fixed; inset: 0;
+      background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.75) 100%);
+      pointer-events: none;
+      z-index: 9998;
+    }
+
+    /* ── Layout ─────────────────────────────────────────────── */
+    .screen {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      padding: 24px;
+      gap: 20px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* ── Header ─────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border: 1px solid var(--border);
+      border-bottom: 2px solid var(--green);
+      padding: 14px 24px;
+      background: var(--panel);
+      position: relative;
+      overflow: hidden;
+    }
+    header::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, var(--green), transparent);
+      animation: scanH 3s linear infinite;
+    }
+    @keyframes scanH {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(100%); }
+    }
+
+    .logo {
+      font-family: 'VT323', monospace;
+      font-size: 2.8rem;
+      color: var(--green);
+      text-shadow: var(--glow);
+      letter-spacing: 4px;
+    }
+    .logo span { color: var(--amber); text-shadow: var(--glow-amber); }
+
+    .header-right {
+      text-align: right;
+      font-size: 0.78rem;
+      color: var(--text);
+      opacity: 0.7;
+      line-height: 1.6;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 14px;
+      border: 1px solid currentColor;
+      font-size: 0.75rem;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .status-pill.online  { color: var(--green); box-shadow: var(--glow); }
+    .status-pill.offline { color: var(--red);   box-shadow: var(--glow-red); }
+    .status-pill.connecting { color: var(--amber); box-shadow: var(--glow-amber); }
+
+    .blink { animation: blink 1s step-end infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* ── Main grid ──────────────────────────────────────────── */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      grid-template-rows: auto auto;
+      gap: 20px;
+    }
+
+    /* ── Panel base ─────────────────────────────────────────── */
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 20px 24px;
+      position: relative;
+    }
+    .panel::before {
+      content: attr(data-label);
+      position: absolute;
+      top: -10px; left: 16px;
+      background: var(--panel);
+      padding: 0 8px;
+      font-size: 0.68rem;
+      color: var(--green);
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      text-shadow: var(--glow);
+    }
+
+    /* ── Big temp display ───────────────────────────────────── */
+    .temp-display {
+      grid-row: span 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 280px;
+    }
+
+    .temp-value-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: flex-start;
+    }
+    .temp-big {
+      font-family: 'Orbitron', sans-serif;
+      font-size: clamp(5rem, 14vw, 10rem);
+      font-weight: 900;
+      color: var(--green);
+      text-shadow: var(--glow);
+      line-height: 1;
+      letter-spacing: -2px;
+      transition: color 0.4s, text-shadow 0.4s;
+    }
+    .temp-big.hot  { color: var(--amber); text-shadow: var(--glow-amber); }
+    .temp-big.very-hot { color: var(--red); text-shadow: var(--glow-red); }
+
+    .temp-unit {
+      font-family: 'Orbitron', sans-serif;
+      font-size: clamp(1.8rem, 4vw, 3rem);
+      font-weight: 700;
+      margin-top: 18px;
+      color: var(--text);
+      opacity: 0.7;
+    }
+    .temp-label {
+      font-family: 'VT323', monospace;
+      font-size: 1.4rem;
+      letter-spacing: 6px;
+      color: var(--text);
+      opacity: 0.55;
+      margin-top: 12px;
+    }
+
+    /* Pulse ring around big display */
+    .pulse-ring {
+      position: absolute;
+      inset: -28px;
+      border-radius: 50%;
+      border: 2px solid var(--green);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .pulse-ring.active {
+      animation: pulse-ring 1.5s ease-out forwards;
+    }
+    @keyframes pulse-ring {
+      0%   { opacity: 0.9; transform: scale(0.92); }
+      100% { opacity: 0;   transform: scale(1.15); }
+    }
+
+    /* ── Gauge / thermometer ────────────────────────────────── */
+    .gauge-panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+    }
+
+    .thermo-wrap {
+      display: flex;
+      align-items: flex-end;
+      gap: 20px;
+    }
+
+    .thermo {
+      width: 36px;
+      height: 220px;
+      border: 2px solid var(--border);
+      border-radius: 18px 18px 50% 50%;
+      position: relative;
+      overflow: hidden;
+      background: #060f06;
+    }
+    .thermo-fill {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      background: linear-gradient(to top, #ff3c3c, #ffb300 50%, #39ff14);
+      transition: height 1.2s cubic-bezier(.4,0,.2,1);
+      height: 0%;
+      box-shadow: 0 0 12px currentColor;
+    }
+    .thermo-ticks {
+      display: flex;
+      flex-direction: column-reverse;
+      justify-content: space-between;
+      height: 220px;
+      font-size: 0.62rem;
+      color: var(--text);
+      opacity: 0.5;
+      padding: 4px 0;
+    }
+    .thermo-ticks span { white-space: nowrap; }
+
+    /* ── Stats sidebar ──────────────────────────────────────── */
+    .stats-panel { grid-column: 2; grid-row: 1 / 3; }
+    .stats-list { list-style: none; display: flex; flex-direction: column; gap: 18px; margin-top: 8px; }
+    .stats-list li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+    }
+    .stats-list li:last-child { border-bottom: none; }
+    .stat-key { color: var(--text); opacity: 0.65; letter-spacing: 1px; }
+    .stat-val {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 1.1rem;
+      color: var(--green);
+      text-shadow: var(--glow);
+    }
+    .stat-val.amber { color: var(--amber); text-shadow: var(--glow-amber); }
+    .stat-val.red   { color: var(--red);   text-shadow: var(--glow-red);   }
+
+    /* MQTT info */
+    .mqtt-info { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
+    .mqtt-row { display: flex; gap: 8px; font-size: 0.72rem; line-height: 1.5; }
+    .mqtt-key { color: var(--text); opacity: 0.5; min-width: 60px; }
+    .mqtt-val { color: var(--green); word-break: break-all; }
+
+    /* ── Chart panel ────────────────────────────────────────── */
+    .chart-panel { grid-column: 1; grid-row: 2; }
+
+    .chart-area {
+      position: relative;
+      height: 140px;
+      margin-top: 12px;
+    }
+    canvas#chart {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* ── Log panel ──────────────────────────────────────────── */
+    .log-panel {
+      grid-column: 1 / -1;
+    }
+    .log-wrap {
+      height: 140px;
+      overflow-y: auto;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 0.78rem;
+      line-height: 1.8;
+      margin-top: 10px;
+    }
+    .log-wrap::-webkit-scrollbar { width: 6px; }
+    .log-wrap::-webkit-scrollbar-track { background: var(--dim); }
+    .log-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .log-entry { display: flex; gap: 12px; }
+    .log-ts  { color: var(--text); opacity: 0.45; min-width: 80px; }
+    .log-msg { color: var(--green); }
+    .log-msg.warn { color: var(--amber); }
+    .log-msg.err  { color: var(--red); }
+
+    /* ── Footer ─────────────────────────────────────────────── */
+    footer {
+      text-align: center;
+      font-size: 0.65rem;
+      color: var(--text);
+      opacity: 0.35;
+      letter-spacing: 3px;
+      padding: 8px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── Retro decorations ──────────────────────────────────── */
+    .corner { position: absolute; width: 12px; height: 12px; }
+    .corner.tl { top: 4px; left: 4px;  border-top: 1px solid var(--green); border-left: 1px solid var(--green); }
+    .corner.tr { top: 4px; right: 4px; border-top: 1px solid var(--green); border-right: 1px solid var(--green); }
+    .corner.bl { bottom: 4px; left: 4px;  border-bottom: 1px solid var(--green); border-left: 1px solid var(--green); }
+    .corner.br { bottom: 4px; right: 4px; border-bottom: 1px solid var(--green); border-right: 1px solid var(--green); }
+
+    /* ── Ticker ─────────────────────────────────────────────── */
+    .ticker-bar {
+      background: #060f06;
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--green);
+      padding: 6px 0;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .ticker-inner {
+      display: inline-block;
+      animation: ticker 28s linear infinite;
+      font-size: 0.72rem;
+      letter-spacing: 3px;
+      color: var(--text);
+      opacity: 0.6;
+    }
+    @keyframes ticker {
+      0%   { transform: translateX(100vw); }
+      100% { transform: translateX(-100%); }
+    }
+
+    /* ── Responsive ─────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .main-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto;
+      }
+      .stats-panel { grid-column: 1; grid-row: auto; }
+      .chart-panel { grid-column: 1; grid-row: auto; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="screen">
+
+  <!-- ── Header ─────────────────────────────────────────── -->
+  <header>
+    <div>
+      <div class="logo">SPEES<span>-402</span> // METEO</div>
+      <div style="font-size:0.72rem;color:var(--text);opacity:0.55;letter-spacing:2px;margin-top:4px;">
+        EMBEDDED SYSTEMS WEATHER STATION
+      </div>
+    </div>
+    <div class="header-right">
+      <div id="clockDisplay" style="font-family:'VT323',monospace;font-size:2rem;color:var(--green);text-shadow:var(--glow);"></div>
+      <div id="dateDisplay" style="margin-top:2px;"></div>
+      <div style="margin-top:10px;">
+        <span class="status-pill connecting" id="mqttStatus">
+          <span class="blink">◉</span>
+          <span id="mqttStatusText">CONNECTING</span>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Ticker ─────────────────────────────────────────── -->
+  <div class="ticker-bar">
+    <span class="ticker-inner" id="ticker">
+      ◈ SPEES-402 WEATHER STATION &nbsp;·&nbsp; CANDIDATE: KAYIRANGA SIMBI KELIA &nbsp;·&nbsp;
+      MQTT BROKER: 157.173.101.159:24022 → BRIDGE: localhost:8765 &nbsp;·&nbsp;
+      TOPIC: spees402/temperature/Kayiranga Simbi Kelia &nbsp;·&nbsp;
+      SENSOR: DHT / ANALOG &nbsp;·&nbsp; MCU: ARDUINO &nbsp;·&nbsp;
+      PROTOCOL: MQTT v5 · QoS 1 RETAINED &nbsp;·&nbsp; ◈
+    </span>
+  </div>
+
+  <!-- ── Main grid ───────────────────────────────────────── -->
+  <div class="main-grid">
+
+    <!-- Big temp display -->
+    <div class="panel temp-display" data-label="LIVE TEMPERATURE">
+      <div class="corner tl"></div><div class="corner tr"></div>
+      <div class="corner bl"></div><div class="corner br"></div>
+      <div class="temp-value-wrap">
+        <div class="temp-big" id="tempBig">--.-</div>
+        <div class="temp-unit">°C</div>
+        <div class="pulse-ring" id="pulseRing"></div>
+      </div>
+      <div class="temp-label">AMBIENT TEMPERATURE</div>
+    </div>
+
+    <!-- Stats sidebar -->
+    <div class="panel stats-panel" data-label="STATISTICS">
+      <div class="corner tl"></div><div class="corner tr"></div>
+      <div class="corner bl"></div><div class="corner br"></div>
+
+      <ul class="stats-list">
+        <li>
+          <span class="stat-key">MAX</span>
+          <span class="stat-val amber" id="statMax">--.-</span>
+        </li>
+        <li>
+          <span class="stat-key">MIN</span>
+          <span class="stat-val" id="statMin">--.-</span>
+        </li>
+        <li>
+          <span class="stat-key">AVG</span>
+          <span class="stat-val" id="statAvg">--.-</span>
+        </li>
+        <li>
+          <span class="stat-key">LAST Δ</span>
+          <span class="stat-val" id="statDelta">+0.00</span>
+        </li>
+        <li>
+          <span class="stat-key">SAMPLES</span>
+          <span class="stat-val" id="statCount">0</span>
+        </li>
+        <li>
+          <span class="stat-key">UPTIME</span>
+          <span class="stat-val" id="statUptime">00:00:00</span>
+        </li>
+      </ul>
+
+      <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px;">
+        <div style="font-size:0.65rem;letter-spacing:3px;color:var(--text);opacity:0.45;margin-bottom:8px;">MQTT CONFIG</div>
+        <div class="mqtt-info">
+          <div class="mqtt-row"><span class="mqtt-key">BROKER</span><span class="mqtt-val">157.173.101.159</span></div>
+          <div class="mqtt-row"><span class="mqtt-key">PORT</span><span class="mqtt-val">24022 (TCP)</span></div>
+          <div class="mqtt-row"><span class="mqtt-key">BRIDGE</span><span class="mqtt-val">localhost:8765</span></div>
+          <div class="mqtt-row"><span class="mqtt-key">TOPIC</span><span class="mqtt-val" style="font-size:0.62rem;">spees402/temperature/<br>Kayiranga Simbi Kelia</span></div>
+          <div class="mqtt-row"><span class="mqtt-key">QoS</span><span class="mqtt-val">1 · RETAINED</span></div>
+        </div>
+      </div>
+
+      <!-- Thermo gauge -->
+      <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px;">
+        <div style="font-size:0.65rem;letter-spacing:3px;color:var(--text);opacity:0.45;margin-bottom:12px;">THERMAL GAUGE</div>
+        <div class="thermo-wrap">
+          <div class="thermo">
+            <div class="thermo-fill" id="thermoFill"></div>
+          </div>
+          <div class="thermo-ticks">
+            <span>60°</span><span>50°</span><span>40°</span>
+            <span>30°</span><span>20°</span><span>10°</span><span>0°</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart panel -->
+    <div class="panel chart-panel" data-label="TEMPERATURE HISTORY (LAST 30 READINGS)">
+      <div class="corner tl"></div><div class="corner tr"></div>
+      <div class="corner bl"></div><div class="corner br"></div>
+      <div class="chart-area">
+        <canvas id="chart"></canvas>
+      </div>
+    </div>
+
+    <!-- Log panel -->
+    <div class="panel log-panel" data-label="SYSTEM LOG">
+      <div class="corner tl"></div><div class="corner tr"></div>
+      <div class="corner bl"></div><div class="corner br"></div>
+      <div class="log-wrap" id="logWrap"></div>
+    </div>
+
+  </div>
+
+  <footer>
+    SPEES-402 EMBEDDED SYSTEMS EXAM &nbsp;·&nbsp; KAYIRANGA SIMBI KELIA &nbsp;·&nbsp;
+    WEATHER STATION v1.0 &nbsp;·&nbsp; ALL RIGHTS RESERVED
+  </footer>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════
+   CONFIG  — dashboard connects to local bridge.py
+   bridge.py subscribes to the real MQTT broker (TCP:24022)
+   and forwards messages here via WebSocket
+   ══════════════════════════════════════════════════════════ */
+const CFG = {
+  // ── Broker (direct WebSocket MQTT attempt) ──────────────
+  brokerHost: "157.173.101.159",
+  brokerPort: 24022,           // try WS MQTT on same port as TCP
+  // ── Local bridge fallback ────────────────────────────────
+  bridgeUrl:  "ws://localhost:8765",
+  // ── Shared ──────────────────────────────────────────────
+  topic:      "spees402/temperature/Kayiranga Simbi Kelia",
+  candidate:  "Kayiranga Simbi Kelia",
+  maxPoints:  30,
+};
+
+/* ══════════════════════════════════════════════════════════
+   STATE
+   ══════════════════════════════════════════════════════════ */
+let readings   = [];
+let startTime  = Date.now();
+let mqttClient = null;
+
+/* ══════════════════════════════════════════════════════════
+   CLOCK
+   ══════════════════════════════════════════════════════════ */
+function updateClock() {
+  const now = new Date();
+  document.getElementById("clockDisplay").textContent =
+    now.toTimeString().slice(0,8);
+  document.getElementById("dateDisplay").textContent =
+    now.toDateString().toUpperCase();
+
+  // uptime
+  const elapsed = Math.floor((Date.now() - startTime) / 1000);
+  const hh = String(Math.floor(elapsed / 3600)).padStart(2,"0");
+  const mm = String(Math.floor((elapsed % 3600) / 60)).padStart(2,"0");
+  const ss = String(elapsed % 60).padStart(2,"0");
+  document.getElementById("statUptime").textContent = `${hh}:${mm}:${ss}`;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+/* ══════════════════════════════════════════════════════════
+   LOG
+   ══════════════════════════════════════════════════════════ */
+function log(msg, level = "info") {
+  const wrap = document.getElementById("logWrap");
+  const ts   = new Date().toTimeString().slice(0,8);
+  const cls  = level === "warn" ? "warn" : level === "err" ? "err" : "";
+  const row  = document.createElement("div");
+  row.className = "log-entry";
+  row.innerHTML = `<span class="log-ts">[${ts}]</span><span class="log-msg ${cls}">${msg}</span>`;
+  wrap.prepend(row);
+  // keep last 200 lines
+  while (wrap.children.length > 200) wrap.removeChild(wrap.lastChild);
+}
+
+/* ══════════════════════════════════════════════════════════
+   CHART (vanilla canvas)
+   ══════════════════════════════════════════════════════════ */
+const canvas = document.getElementById("chart");
+const ctx    = canvas.getContext("2d");
+
+function resizeCanvas() {
+  canvas.width  = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
+  drawChart();
+}
+
+function drawChart() {
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if (readings.length < 2) {
+    ctx.fillStyle = "rgba(57,255,20,0.2)";
+    ctx.font = "16px 'Share Tech Mono'";
+    ctx.textAlign = "center";
+    ctx.fillText("Awaiting data...", W/2, H/2);
+    return;
+  }
+
+  const vals = readings.map(r => r.temp);
+  const minV = Math.min(...vals) - 1;
+  const maxV = Math.max(...vals) + 1;
+  const range = maxV - minV || 1;
+
+  const padL = 38, padR = 10, padT = 10, padB = 24;
+  const w = W - padL - padR;
+  const h = H - padT - padB;
+
+  // Grid lines
+  ctx.strokeStyle = "rgba(30,58,30,0.8)";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + (i / 4) * h;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + w, y); ctx.stroke();
+    const label = (maxV - (i / 4) * range).toFixed(1);
+    ctx.fillStyle = "rgba(200,240,200,0.4)";
+    ctx.font = "10px 'Share Tech Mono'";
+    ctx.textAlign = "right";
+    ctx.fillText(label, padL - 4, y + 4);
+  }
+
+  // Fill gradient
+  const grad = ctx.createLinearGradient(0, padT, 0, padT + h);
+  grad.addColorStop(0,   "rgba(57,255,20,0.35)");
+  grad.addColorStop(1,   "rgba(57,255,20,0.02)");
+
+  const xStep = w / (CFG.maxPoints - 1);
+
+  ctx.beginPath();
+  readings.forEach((r, i) => {
+    const x = padL + i * xStep;
+    const y = padT + h - ((r.temp - minV) / range) * h;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  // close fill
+  const lastX = padL + (readings.length - 1) * xStep;
+  ctx.lineTo(lastX, padT + h);
+  ctx.lineTo(padL, padT + h);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Stroke line
+  ctx.beginPath();
+  readings.forEach((r, i) => {
+    const x = padL + i * xStep;
+    const y = padT + h - ((r.temp - minV) / range) * h;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = "#39ff14";
+  ctx.lineWidth = 2;
+  ctx.shadowColor = "#39ff14";
+  ctx.shadowBlur = 8;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Dots on data points
+  readings.forEach((r, i) => {
+    const x = padL + i * xStep;
+    const y = padT + h - ((r.temp - minV) / range) * h;
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = "#39ff14";
+    ctx.shadowColor = "#39ff14";
+    ctx.shadowBlur = 6;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  });
+}
+
+window.addEventListener("resize", resizeCanvas);
+setTimeout(resizeCanvas, 100);
+
+/* ══════════════════════════════════════════════════════════
+   TEMPERATURE UPDATE
+   ══════════════════════════════════════════════════════════ */
+function onNewTemp(tempStr) {
+  const temp = parseFloat(tempStr);
+  if (isNaN(temp)) { log(`Bad value received: "${tempStr}"`, "warn"); return; }
+
+  const prev = readings.length ? readings[readings.length - 1].temp : null;
+  readings.push({ temp, ts: Date.now() });
+  if (readings.length > CFG.maxPoints) readings.shift();
+
+  // Big display
+  const bigEl = document.getElementById("tempBig");
+  bigEl.textContent = temp.toFixed(1);
+  bigEl.className = "temp-big" + (temp >= 35 ? " very-hot" : temp >= 28 ? " hot" : "");
+
+  // Pulse ring
+  const ring = document.getElementById("pulseRing");
+  ring.classList.remove("active");
+  void ring.offsetWidth; // reflow
+  ring.classList.add("active");
+
+  // Thermometer (0–60 range)
+  const pct = Math.min(100, Math.max(0, (temp / 60) * 100));
+  document.getElementById("thermoFill").style.height = pct + "%";
+
+  // Stats
+  const temps = readings.map(r => r.temp);
+  const maxT  = Math.max(...temps).toFixed(1);
+  const minT  = Math.min(...temps).toFixed(1);
+  const avgT  = (temps.reduce((a,b)=>a+b,0)/temps.length).toFixed(1);
+  document.getElementById("statMax").textContent   = maxT;
+  document.getElementById("statMin").textContent   = minT;
+  document.getElementById("statAvg").textContent   = avgT;
+  document.getElementById("statCount").textContent = readings.length;
+
+  // Delta
+  if (prev !== null) {
+    const delta = temp - prev;
+    const dEl   = document.getElementById("statDelta");
+    dEl.textContent = (delta >= 0 ? "+" : "") + delta.toFixed(2);
+    dEl.className   = "stat-val" + (delta > 0 ? " amber" : delta < 0 ? "" : "");
+  }
+
+  // Chart
+  drawChart();
+
+  // Log
+  log(`TEMP: ${temp.toFixed(1)} °C  →  ${CFG.topic}`);
+}
+
+/* ══════════════════════════════════════════════════════════
+   WebSocket connection to local bridge.py
+   ══════════════════════════════════════════════════════════ */
+function setStatus(state) {
+  const pill = document.getElementById("mqttStatus");
+  const txt  = document.getElementById("mqttStatusText");
+  pill.className = "status-pill " + state;
+  txt.textContent = state.toUpperCase();
+}
+
+let ws = null;
+let wsRetryDelay = 3000;
+
+function connectBridge() {
+  log(`Connecting to bridge at ${CFG.bridgeUrl} ...`);
+  setStatus("connecting");
+
+  ws = new WebSocket(CFG.bridgeUrl);
+
+  ws.onopen = () => {
+    log("Bridge connected! Waiting for MQTT data ...");
+    setStatus("online");
+    wsRetryDelay = 3000; // reset backoff
+  };
+
+  ws.onmessage = (event) => {
+    const payload = event.data.trim();
+    log(`Received from bridge: "${payload} °C"`);
+    onNewTemp(payload);
+  };
+
+  ws.onerror = () => {
+    log("Bridge connection error. Is bridge.py running?", "err");
+  };
+
+  ws.onclose = () => {
+    log(`Bridge disconnected. Retrying in ${wsRetryDelay/1000}s ...`, "warn");
+    setStatus("offline");
+    setTimeout(connectBridge, wsRetryDelay);
+    wsRetryDelay = Math.min(wsRetryDelay * 1.5, 15000); // exponential backoff
+  };
+}
+
+connectBridge();
+
+/* ── Demo mode: simulated data until real readings arrive ───── */
+let realDataReceived = false;
+
+// Patch onNewTemp to mark real data
+const _origOnNewTemp = onNewTemp;
+window.onNewTemp = function(v) { realDataReceived = true; _origOnNewTemp(v); };
+// ws.onmessage already calls onNewTemp via the global; repoint it
+const _origConnectBridge = connectBridge;
+
+(function demoTick() {
+  if (!realDataReceived) {
+    const fake = (23 + Math.random() * 5).toFixed(1);
+    log(`[DEMO] Simulated ${fake} °C — start bridge.py for live data`, "warn");
+    onNewTemp(fake);
+  }
+  setTimeout(demoTick, 4000);
+})();
+</script>
+</body>
+</html>
