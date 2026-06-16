@@ -9,7 +9,7 @@
 ## 📸 Dashboard Preview
 link: http://157.173.101.159:24022/dashboard.html
 
-![SPEES-402 Retro Dashboard](C:\Users\HP\.gemini\antigravity-ide\brain\360851cd-8edb-4d5d-ac1b-131c2ace2634\architecture_diagram_1781595084261.png)
+
 
 ---
 
