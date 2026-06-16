@@ -8,7 +8,7 @@
 
 ## 📸 Dashboard Preview
 
-![SPEES-402 Retro Dashboard](C:\Users\HP\.gemini\antigravity-ide\brain\360851cd-8edb-4d5d-ac1b-131c2ace2634\architecture_diagram_1781595084261.png)
+![SPEES-402 Retro Dashboard — Live at 25.7 °C, ONLINE status](image.png)
 
 ---
 
